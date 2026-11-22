@@ -2,7 +2,7 @@
 
 A map of what's actually getting built in NSW: every project followed from DA to construction certificate to occupation certificate, with cost, storeys, units and (company) builder names. Fed only by the NSW Planning Portal's keyless open data API.
 
-Data © NSW Department of Planning, Housing and Infrastructure, [CC BY 4.0](https://data.nsw.gov.au/data/dataset/online-da-data-api).
+Data © NSW Department of Planning, Housing and Infrastructure, [Creative Commons Attribution](https://data.nsw.gov.au/data/dataset/online-da-data-api) (version to be confirmed with the data broker; see `docs/data-spike.md`).
 
 ## Stack
 

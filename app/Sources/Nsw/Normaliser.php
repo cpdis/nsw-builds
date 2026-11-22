@@ -31,47 +31,53 @@ class Normaliser
     }
 
     /**
-     * "Lot 12" + "DP123456" -> "12/DP123456". A section, whether it arrives in
-     * the feed's own Section field or inside the lot ("Lot 3 Sec 2"), is kept:
-     * "3/2/DP758000". Same shape as spike/q4_linkrate.py lot_keys().
+     * "Lot 12" + "DP123456" -> "12/DP123456". With a section (the feed's
+     * `Section` field, or "3 Sec 2" written into the lot) -> "3/2/DP758000",
+     * so Lot 44 Sec 4 and Lot 44 Sec 7 of the same DP stay distinct.
      */
     public static function lotKey(?string $lot, ?string $plan, ?string $section = null): ?string
     {
         $lot = strtoupper(trim((string) $lot));
         $plan = strtoupper(preg_replace('/\s+/', '', (string) $plan));
         $section = strtoupper(preg_replace('/\s+/', '', (string) $section));
+        if ($section === 'NULL') {
+            $section = '';
+        }
 
         $lot = preg_replace('/^LOT\s*/', '', $lot);
-        $lot = preg_replace('/\s*SEC(TION)?\s*/', '/', $lot);
+        if (preg_match('/^(.+?)\s*SEC(?:TION)?\s*(\S+)$/', $lot, $m)) {
+            [$lot, $section] = [$m[1], $section !== '' ? $section : $m[2]];
+        }
         $lot = preg_replace('/\s+/', '', $lot);
 
-        if ($lot === '' || $plan === '' || ! preg_match('/^(DP|SP|CP|PP)\d+$/', $plan)) {
+        if ($lot === '' || $lot === 'NULL' || ! preg_match('/^(DP|SP|CP|PP)\d+$/', $plan)) {
             return null;
         }
 
-        if ($section !== '' && ! str_contains($lot, '/')) {
-            $lot .= '/'.$section;
-        }
-
-        return $lot.'/'.$plan;
+        return $section === '' ? "{$lot}/{$plan}" : "{$lot}/{$section}/{$plan}";
     }
 
-    /** Abbreviation -> long form. Must stay identical to STREET_TYPES in spike/q4_linkrate.py. */
-    private const STREET_TYPES = [
+    /**
+     * Same rule as `addr_key` in spike/q4_linkrate.py, so the spike's link
+     * rates describe the linker: upper-case, anything but A-Z/0-9 becomes a
+     * space, and street-type abbreviations are expanded. State and postcode
+     * are kept. Change both together.
+     */
+    public const STREET_TYPES = [
         'ST' => 'STREET', 'RD' => 'ROAD', 'AVE' => 'AVENUE', 'AV' => 'AVENUE', 'DR' => 'DRIVE',
         'PL' => 'PLACE', 'CRES' => 'CRESCENT', 'CR' => 'CRESCENT', 'PDE' => 'PARADE',
         'HWY' => 'HIGHWAY', 'LN' => 'LANE', 'CT' => 'COURT', 'TCE' => 'TERRACE', 'CL' => 'CLOSE',
     ];
 
-    /**
-     * Linker rule 3. Mirrors addr_key() in spike/q4_linkrate.py exactly, so the
-     * rule-3 link rates in docs/data-spike.md describe this code: upper-case,
-     * every non-alphanumeric becomes a space, abbreviated street types expand.
-     */
     public static function addressKey(?string $address): ?string
     {
-        $words = preg_split('/\s+/', trim(preg_replace('/[^A-Z0-9 ]/', ' ', strtoupper((string) $address))), -1, PREG_SPLIT_NO_EMPTY);
+        $a = strtoupper(trim((string) $address));
+        if ($a === '' || $a === 'NULL') {
+            return null;
+        }
 
-        return implode(' ', array_map(fn (string $w) => self::STREET_TYPES[$w] ?? $w, $words)) ?: null;
+        $words = preg_split('/\s+/', trim(preg_replace('/[^A-Z0-9 ]/', ' ', $a)), -1, PREG_SPLIT_NO_EMPTY);
+
+        return implode(' ', array_map(fn ($w) => self::STREET_TYPES[$w] ?? $w, $words)) ?: null;
     }
 }
