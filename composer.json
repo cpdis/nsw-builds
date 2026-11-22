@@ -1,6 +1,6 @@
 {
     "$schema": "https://getcomposer.org/schema.json",
-    "name": "laravel/react-starter-kit",
+    "name": "cpdis/nsw-builds",
     "type": "project",
     "description": "The skeleton application for the Laravel framework.",
     "keywords": [
@@ -10,10 +10,13 @@
     "license": "MIT",
     "require": {
         "php": "^8.2",
-        "inertiajs/inertia-laravel": "^2.0",
+        "laravel/fortify": "^1.30",
         "laravel/framework": "^12.0",
         "laravel/tinker": "^2.10.1",
-        "tightenco/ziggy": "^2.4"
+        "livewire/blaze": "^1.0",
+        "livewire/flux": "^2.9.0",
+        "livewire/flux-pro": "^2.22",
+        "livewire/livewire": "^4.0"
     },
     "require-dev": {
         "fakerphp/faker": "^1.23",
@@ -72,5 +75,11 @@
         }
     },
     "minimum-stability": "dev",
-    "prefer-stable": true
+    "prefer-stable": true,
+    "repositories": {
+        "flux-pro": {
+            "type": "composer",
+            "url": "https://composer.fluxui.dev"
+        }
+    }
 }
