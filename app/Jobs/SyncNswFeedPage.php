@@ -11,7 +11,8 @@ use Illuminate\Foundation\Queue\Queueable;
 
 /**
  * Fetches and stores one page, then queues the next one. One page per job
- * keeps each job well under Laravel Cloud's 90 s cap.
+ * keeps each job well under Laravel Cloud's 90 s cap. `nsw:sync --now` calls
+ * syncPage() in a loop instead, so a backfill never touches the queue.
  */
 class SyncNswFeedPage implements ShouldQueue
 {
@@ -20,6 +21,9 @@ class SyncNswFeedPage implements ShouldQueue
     public int $tries = 3;
 
     public int $timeout = 85;
+
+    /** @var list<int> */
+    public array $backoff = [10, 30];
 
     /** @param array<string, mixed> $filters */
     public function __construct(
@@ -31,23 +35,32 @@ class SyncNswFeedPage implements ShouldQueue
 
     public function handle(EplanningClient $client, ApplicationUpserter $upserter): void
     {
-        $pageSize = config('nsw.page_size');
-        $records = $client->page($this->feed, $this->pageNumber, $pageSize, $this->filters);
-        $stored = $upserter->upsert($this->feed, $records);
-
-        $run = SyncRun::findOrFail($this->syncRunId);
-        $run->increment('pages');
-        $run->increment('records', $stored);
-
-        if (count($records) < $pageSize) {
-            $run->update(['finished_at' => now()]);
-            // TODO(milestone 2): dispatch the linker here once it exists.
-
+        if ($this->syncPage($client, $upserter)) {
             return;
         }
 
         self::dispatch($this->feed, $this->filters, $this->pageNumber + 1, $this->syncRunId)
             ->delay(now()->addMilliseconds(config('nsw.page_delay_ms')));
+    }
+
+    /** Fetch and store this page. Returns true when it was the last page and the run is finished. */
+    public function syncPage(EplanningClient $client, ApplicationUpserter $upserter): bool
+    {
+        $page = $client->page($this->feed, $this->pageNumber, config('nsw.page_size'), $this->filters);
+        $stored = $upserter->upsert($this->feed, $page->records);
+
+        $run = SyncRun::findOrFail($this->syncRunId);
+        $run->increment('pages');
+        $run->increment('records', $stored);
+
+        if (! $page->isLast()) {
+            return false;
+        }
+
+        $run->update(['finished_at' => now()]);
+        // TODO(milestone 2): dispatch the linker here once it exists.
+
+        return true;
     }
 
     public function failed(\Throwable $e): void

@@ -2,9 +2,12 @@
 
 namespace App\Sources\Nsw;
 
+use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\Client\PendingRequest;
+use Illuminate\Http\Client\RequestException;
 use Illuminate\Support\Facades\Http;
-use RuntimeException;
+use Throwable;
+use UnexpectedValueException;
 
 /**
  * Client for the NSW Planning Portal open data API.
@@ -14,9 +17,12 @@ use RuntimeException;
  */
 class EplanningClient
 {
+    /** Attempts per page. With the default 20 s timeout: 3 × 20 s + 1 s + 2 s = 63 s, inside the job's 85 s. */
+    public const ATTEMPTS = 3;
+
     public function __construct(
         private readonly string $baseUrl,
-        private readonly int $timeout = 60,
+        private readonly int $timeout = 20,
     ) {}
 
     public static function fromConfig(): self
@@ -24,13 +30,8 @@ class EplanningClient
         return new self(config('nsw.base_url'), config('nsw.timeout'));
     }
 
-    /**
-     * Fetch one page. Returns the list of application records on that page.
-     *
-     * @param  array<string, mixed>  $filters  e.g. ['ApplicationLastUpdatedFrom' => '2026-11-20']
-     * @return list<array<string, mixed>>
-     */
-    public function page(Feed $feed, int $pageNumber, int $pageSize, array $filters = []): array
+    /** @param  array<string, mixed>  $filters  e.g. ['ApplicationLastUpdatedFrom' => '2026-11-20'] */
+    public function page(Feed $feed, int $pageNumber, int $pageSize, array $filters = []): FeedPage
     {
         $response = $this->request()
             ->withHeaders([
@@ -40,47 +41,37 @@ class EplanningClient
             ])
             ->get($this->baseUrl.'/'.$feed->endpoint());
 
-        $response->throw();
-
-        return self::extractRecords($response->json());
+        return self::parse($response->json(), $pageNumber);
     }
 
     /**
-     * The envelope shape is unconfirmed until the data spike runs, so accept a
-     * bare list or the first list-valued key of an object.
-     *
-     * @return list<array<string, mixed>>
+     * The envelope is `{PageSize, PageNumber, TotalPages, TotalCount, Application: [...]}`
+     * (docs/data-spike.md). Anything else is an error, never an empty page: an
+     * empty page would mark the run finished and move the watermark.
      */
-    public static function extractRecords(mixed $body): array
+    public static function parse(mixed $body, int $pageNumber): FeedPage
     {
-        if (! is_array($body)) {
-            throw new RuntimeException('Unexpected eplanning response: '.json_encode($body));
+        if (! is_array($body) || ! isset($body['Application']) || ! is_array($body['Application']) || ! is_numeric($body['TotalPages'] ?? null)) {
+            throw new UnexpectedValueException('Unexpected eplanning response: '.substr((string) json_encode($body), 0, 300));
         }
 
-        if (array_is_list($body)) {
-            return $body;
-        }
-
-        foreach (['Application', 'Applications', 'data', 'Data', 'records'] as $key) {
-            if (isset($body[$key]) && is_array($body[$key])) {
-                return array_values($body[$key]);
-            }
-        }
-
-        foreach ($body as $value) {
-            if (is_array($value) && array_is_list($value)) {
-                return $value;
-            }
-        }
-
-        return [];
+        return new FeedPage(array_values($body['Application']), $pageNumber, (int) $body['TotalPages']);
     }
 
     private function request(): PendingRequest
     {
         return Http::acceptJson()
             ->timeout($this->timeout)
-            // Exponential backoff on 429/5xx and connection errors.
-            ->retry(5, fn (int $attempt) => 2 ** $attempt * 1000, throw: true);
+            ->retry(self::ATTEMPTS, fn (int $attempt) => 2 ** ($attempt - 1) * 1000, self::retryable(...));
+    }
+
+    /** Retry connection errors, 429 and 5xx. A 4xx will not get better by asking again. */
+    private static function retryable(Throwable $e): bool
+    {
+        if ($e instanceof ConnectionException) {
+            return true;
+        }
+
+        return $e instanceof RequestException && ($e->response->status() === 429 || $e->response->serverError());
     }
 }

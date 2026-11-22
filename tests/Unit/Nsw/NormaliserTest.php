@@ -31,8 +31,24 @@ class NormaliserTest extends TestCase
     {
         $this->assertSame(
             Normaliser::addressKey('57 Station Road, SEVEN HILLS NSW 2147'),
-            Normaliser::addressKey('57 STATION RD SEVEN HILLS'),
+            Normaliser::addressKey('57 STATION RD SEVEN HILLS NSW 2147'),
         );
+        $this->assertSame(Normaliser::addressKey('5 OAK CR KELLYVILLE 2155'), Normaliser::addressKey('5 OAK CRESCENT KELLYVILLE 2155'));
+        $this->assertSame(Normaliser::addressKey('1 SMITH AV MENAI 2234'), Normaliser::addressKey('1 SMITH AVENUE MENAI 2234'));
+    }
+
+    /** The PHP key must equal the spike's addr_key(), which produced the rule-3 numbers in docs/data-spike.md. */
+    public function test_address_key_matches_the_spike(): void
+    {
+        $this->assertSame('57 STATION ROAD SEVEN HILLS NSW 2147', Normaliser::addressKey('57 Station Rd, SEVEN HILLS NSW 2147'));
+        $this->assertSame('1 23 SMITH STREET MENAI 2234', Normaliser::addressKey('1/23 Smith St MENAI 2234'));
+    }
+
+    public function test_lot_key_keeps_a_separate_section_field(): void
+    {
+        $this->assertSame('3/2/DP758000', Normaliser::lotKey('3', 'DP758000', '2'));
+        $this->assertSame('3/2/DP758000', Normaliser::lotKey('3 Sec 2', 'DP758000', '2'));
+        $this->assertSame('3/DP758000', Normaliser::lotKey('3', 'DP758000', ''));
     }
 
     #[DataProvider('builderNames')]
