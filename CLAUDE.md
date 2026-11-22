@@ -1,6 +1,6 @@
 # NSW Builds
 
-A map of NSW development activity (DA, CDC, CC, OC) built on Laravel 12 + Inertia React, Postgres 16 + PostGIS.
+A map of NSW development activity (DA, CDC, CC, OC) built on Laravel 12 + Livewire 4 + Flux Pro, Postgres 16 + PostGIS.
 
 ## Workflow: pstack
 
@@ -17,4 +17,6 @@ This repo uses [pstack](https://github.com/cursor/plugins/tree/main/pstack). `.c
 - `api.apps1.nsw.gov.au` (eplanning feeds) is reachable only from Colin's Mac. Cloud sandboxes get a proxy 403. Run spike scripts and `nsw:sync` against the live API there.
 - Local checkout on the Mac: `/Users/colin/Documents/Personal Projects/nsw-builds`.
 - Tests need Postgres with PostGIS (`php artisan test`). CI uses `postgis/postgis:16-3.4`.
+- Flux Pro installs from `composer.fluxui.dev` and needs credentials. Locally they live in the gitignored `auth.json`; CI reads the `FLUX_USERNAME` and `FLUX_LICENSE_KEY` repo secrets. Never commit the key. Pro components (`flux:chart`, `flux:table`, `flux:date-picker`, ...) are documented at fluxui.dev.
+- UI is Blade + Livewire. Page components are single-file Livewire components under `resources/views/pages` (`pages::` namespace). MapLibre stays a JS island (`<x-map>`, `wire:ignore` + Alpine `nswMap`); do not let Livewire morph it.
 - Data spike findings: `docs/data-spike.md`. Hosting notes: `docs/hosting.md`.
