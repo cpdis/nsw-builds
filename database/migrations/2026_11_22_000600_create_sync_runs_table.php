@@ -11,9 +11,13 @@ return new class extends Migration
         Schema::create('sync_runs', function (Blueprint $table) {
             $table->id();
             $table->string('feed', 8)->index();
+            // incremental runs move the nightly watermark; scoped runs (--since, --from, --council) never do
+            $table->string('kind', 16)->index();
             $table->jsonb('filters');
             $table->unsignedInteger('pages')->default(0);
             $table->unsignedInteger('records')->default(0);
+            $table->unsignedInteger('skipped')->default(0);
+            $table->unsignedInteger('total_count')->nullable();
             $table->timestamp('started_at');
             $table->timestamp('finished_at')->nullable();
             $table->text('error')->nullable();

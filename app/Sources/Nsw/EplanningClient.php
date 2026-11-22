@@ -2,36 +2,53 @@
 
 namespace App\Sources\Nsw;
 
+use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\Client\PendingRequest;
+use Illuminate\Http\Client\RequestException;
 use Illuminate\Support\Facades\Http;
-use RuntimeException;
+use InvalidArgumentException;
+use Throwable;
 
 /**
  * Client for the NSW Planning Portal open data API.
  *
  * The API is keyless but header-driven: PageSize, PageNumber and a JSON
- * `filters` header. Without them it answers "Required parameters not met".
+ * `filters` header. Every feed answers with the same envelope:
+ * {PageSize, PageNumber, TotalPages, TotalCount, Application: [...]}.
  */
 class EplanningClient
 {
+    /**
+     * Filters the spike confirmed on all four feeds. The API silently ignores
+     * an unknown filter name and returns the whole feed, so anything else is
+     * rejected here rather than sent.
+     */
+    public const FILTERS = [
+        'LodgementDateFrom', 'LodgementDateTo',
+        'DeterminationDateFrom', 'DeterminationDateTo',
+        'CostOfDevelopmentFrom', 'CostOfDevelopmentTo',
+        'CouncilName', 'ApplicationLastUpdatedFrom', 'ApplicationStatus',
+        'DevelopmentCategory',
+    ];
+
     public function __construct(
         private readonly string $baseUrl,
-        private readonly int $timeout = 60,
+        private readonly int $timeout = 20,
+        private readonly int $attempts = 3,
     ) {}
 
     public static function fromConfig(): self
     {
-        return new self(config('nsw.base_url'), config('nsw.timeout'));
+        return new self(config('nsw.base_url'), config('nsw.timeout'), config('nsw.attempts'));
     }
 
-    /**
-     * Fetch one page. Returns the list of application records on that page.
-     *
-     * @param  array<string, mixed>  $filters  e.g. ['ApplicationLastUpdatedFrom' => '2026-11-20']
-     * @return list<array<string, mixed>>
-     */
-    public function page(Feed $feed, int $pageNumber, int $pageSize, array $filters = []): array
+    /** @param array<string, mixed> $filters e.g. ['ApplicationLastUpdatedFrom' => '2026-11-20'] */
+    public function page(Feed $feed, int $pageNumber, int $pageSize, array $filters = []): FeedPage
     {
+        if ($unknown = array_diff(array_keys($filters), self::FILTERS)) {
+            throw new InvalidArgumentException('Unsupported eplanning filter(s): '.implode(', ', $unknown));
+        }
+
         $response = $this->request()
             ->withHeaders([
                 'PageSize' => (string) $pageSize,
@@ -40,47 +57,49 @@ class EplanningClient
             ])
             ->get($this->baseUrl.'/'.$feed->endpoint());
 
-        $response->throw();
-
-        return self::extractRecords($response->json());
+        return self::parse($response->json(), $pageNumber);
     }
 
-    /**
-     * The envelope shape is unconfirmed until the data spike runs, so accept a
-     * bare list or the first list-valued key of an object.
-     *
-     * @return list<array<string, mixed>>
-     */
-    public static function extractRecords(mixed $body): array
+    /** Anything but the documented envelope is an error, never an empty last page. */
+    public static function parse(mixed $body, int $requestedPage): FeedPage
     {
-        if (! is_array($body)) {
-            throw new RuntimeException('Unexpected eplanning response: '.json_encode($body));
+        if (! is_array($body) || ! isset($body['Application']) || ! is_array($body['Application'])
+            || ! isset($body['TotalPages']) || ! is_numeric($body['TotalPages'])) {
+            throw new UnexpectedResponse('Unexpected eplanning response: '.mb_substr((string) json_encode($body), 0, 500));
         }
 
-        if (array_is_list($body)) {
-            return $body;
-        }
-
-        foreach (['Application', 'Applications', 'data', 'Data', 'records'] as $key) {
-            if (isset($body[$key]) && is_array($body[$key])) {
-                return array_values($body[$key]);
-            }
-        }
-
-        foreach ($body as $value) {
-            if (is_array($value) && array_is_list($value)) {
-                return $value;
-            }
-        }
-
-        return [];
+        return new FeedPage(
+            records: array_values($body['Application']),
+            pageNumber: (int) ($body['PageNumber'] ?? $requestedPage),
+            totalPages: (int) $body['TotalPages'],
+            totalCount: (int) ($body['TotalCount'] ?? 0),
+        );
     }
 
+    /** Worst case: attempts × timeout + 1 s + 2 s backoff, well inside the job's 85 s. */
     private function request(): PendingRequest
     {
         return Http::acceptJson()
             ->timeout($this->timeout)
-            // Exponential backoff on 429/5xx and connection errors.
-            ->retry(5, fn (int $attempt) => 2 ** $attempt * 1000, throw: true);
+            ->retry(
+                $this->attempts,
+                fn (int $attempt) => $attempt * 1000,
+                fn (Throwable $e) => self::isRetryable($e),
+            );
+    }
+
+    public static function isRetryable(Throwable $e): bool
+    {
+        if ($e instanceof ConnectionException) {
+            return true;
+        }
+
+        if ($e instanceof RequestException) {
+            $status = $e->response->status();
+
+            return $status === 429 || $status >= 500;
+        }
+
+        return false;
     }
 }
