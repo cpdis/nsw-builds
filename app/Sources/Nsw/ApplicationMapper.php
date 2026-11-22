@@ -32,7 +32,7 @@ class ApplicationMapper
 
         $lotKeys = collect(Arr::wrap($r['Location'] ?? []))
             ->flatMap(fn ($loc) => Arr::wrap($loc['Lot'] ?? []))
-            ->map(fn ($lot) => Normaliser::lotKey($lot['Lot'] ?? null, $lot['PlanLabel'] ?? null))
+            ->map(fn ($lot) => Normaliser::lotKey($lot['Lot'] ?? null, $lot['PlanLabel'] ?? null, $lot['Section'] ?? null))
             ->filter()->unique()->values()->all();
 
         $x = $location['X'] ?? null; // longitude
@@ -41,24 +41,26 @@ class ApplicationMapper
         return [
             'feed' => $feed->value,
             'pan' => (string) ($r['PlanningPortalApplicationNumber'] ?? $r['PAN'] ?? ''),
-            'application_type' => $r['ApplicationType'] ?? null,
-            'status' => $r['ApplicationStatus'] ?? null,
-            'council_name' => data_get($r, 'Council.CouncilName'),
+            'application_type' => self::fit($r['ApplicationType'] ?? null),
+            'status' => self::fit($r['ApplicationStatus'] ?? null),
+            'council_name' => self::fit(data_get($r, 'Council.CouncilName')),
             'development_types' => self::list($r['DevelopmentType'] ?? null),
             'building_classes' => self::list($r['BuildingCodeClass'] ?? null),
             'lodged_at' => Normaliser::date($r['LodgementDate'] ?? null)?->toDateString(),
             'determined_at' => Normaliser::date($r['DeterminationDate'] ?? null)?->toDateString(),
             'exhibition_starts_at' => Normaliser::date($r['AssessmentExhibitionStartDate'] ?? null)?->toDateString(),
             'exhibition_ends_at' => Normaliser::date($r['AssessmentExhibitionEndDate'] ?? null)?->toDateString(),
-            'source_updated_at' => Normaliser::date($r['DateLastUpdated'] ?? null),
-            'cost' => self::number($r['CostOfDevelopment'] ?? null),
-            'storeys' => self::int($r['StoreysProposed'] ?? $r['NumberOfStoreys'] ?? null),
-            'units' => self::int($r['UnitsProposed'] ?? null),
-            'gross_floor_area' => self::number($r['ProposedGrossFloorArea'] ?? null),
-            'parent_reference' => self::parentReference($r),
+            // DateLastUpdated is Sydney local time; columns hold UTC like every other timestamp.
+            'source_updated_at' => Normaliser::date($r['DateLastUpdated'] ?? null)?->utc(),
+            // Values outside the column range are nulled, not allowed to fail the page.
+            'cost' => self::within(self::number($r['CostOfDevelopment'] ?? null), self::MAX_COST),
+            'storeys' => self::within(self::int($r['StoreysProposed'] ?? $r['NumberOfStoreys'] ?? null), self::MAX_SMALLINT),
+            'units' => self::within(self::int($r['UnitsProposed'] ?? null), self::MAX_INT),
+            'gross_floor_area' => self::within(self::number($r['ProposedGrossFloorArea'] ?? null), self::MAX_FLOOR_AREA),
+            'parent_reference' => self::fit(self::parentReference($r)),
             'address' => $location['FullAddress'] ?? null,
-            'address_key' => Normaliser::addressKey($location['FullAddress'] ?? null),
-            'suburb' => $location['Suburb'] ?? null,
+            'address_key' => self::fit(Normaliser::addressKey($location['FullAddress'] ?? null)),
+            'suburb' => self::fit($location['Suburb'] ?? null),
             'postcode' => isset($location['Postcode']) ? substr((string) $location['Postcode'], 0, 4) : null,
             'lot_keys' => $lotKeys,
             'lng' => is_numeric($x) ? (float) $x : null,
@@ -66,6 +68,26 @@ class ApplicationMapper
             'builder_legal_name' => self::str($r['BuilderLegalName'] ?? null),
             'builder_trading_name' => self::str($r['BuilderTradingName'] ?? null),
         ];
+    }
+
+    /** Column limits from the applications migration: smallint, integer, numeric(15,2), numeric(12,2). */
+    private const MAX_SMALLINT = 32767;
+
+    private const MAX_INT = 2147483647;
+
+    private const MAX_COST = 9999999999999.99;
+
+    private const MAX_FLOOR_AREA = 9999999999.99;
+
+    private static function within(int|float|null $v, int|float $max): int|float|null
+    {
+        return $v === null || $v < 0 || $v > $max ? null : $v;
+    }
+
+    /** varchar(255) columns: truncate rather than fail the page. */
+    private static function fit(mixed $v): ?string
+    {
+        return $v === null || $v === '' ? null : mb_substr(trim((string) $v), 0, 255);
     }
 
     private static function parentReference(array $r): ?string

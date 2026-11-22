@@ -40,8 +40,8 @@ class NswSyncTest extends TestCase
 
         Http::fake([
             '*/OnlineCC' => Http::sequence()
-                ->push(['Application' => [$this->cc('PAN-1', 'Acme Constructions Pty Ltd'), $this->cc('PAN-2', 'John Smith')]])
-                ->push(['Application' => [$this->cc('PAN-3', 'ACME CONSTRUCTIONS PTY. LIMITED')]]),
+                ->push(['TotalPages' => 2, 'Application' => [$this->cc('PAN-1', 'Acme Constructions Pty Ltd'), $this->cc('PAN-2', 'John Smith')]])
+                ->push(['TotalPages' => 2, 'Application' => [$this->cc('PAN-3', 'ACME CONSTRUCTIONS PTY. LIMITED')]]),
         ]);
 
         $this->artisan('nsw:sync', ['feed' => ['cc'], '--since' => '2026-11-20', '--now' => true])->assertSuccessful();
@@ -73,7 +73,7 @@ class NswSyncTest extends TestCase
     public function test_resync_upserts_on_pan(): void
     {
         config(['nsw.page_size' => 10]);
-        Http::fake(['*/OnlineCC' => Http::response([$this->cc('PAN-1', 'Acme Pty Ltd')])]);
+        Http::fake(['*/OnlineCC' => Http::response(['TotalPages' => 1, 'Application' => [$this->cc('PAN-1', 'Acme Pty Ltd')]])]);
 
         $this->artisan('nsw:sync', ['feed' => ['cc'], '--now' => true])->assertSuccessful();
         $this->artisan('nsw:sync', ['feed' => ['cc'], '--now' => true])->assertSuccessful();
