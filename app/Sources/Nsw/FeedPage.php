@@ -2,18 +2,19 @@
 
 namespace App\Sources\Nsw;
 
-/** One page of a feed, as the eplanning envelope describes it. */
-final readonly class FeedPage
+/** One page of a feed, as the API's envelope describes it. */
+final class FeedPage
 {
     /** @param list<array<string, mixed>> $records */
     public function __construct(
-        public array $records,
-        public int $pageNumber,
-        public int $totalPages,
+        public readonly array $records,
+        public readonly int $pageNumber,
+        public readonly int $totalPages,
+        public readonly int $totalCount,
     ) {}
 
     public function isLast(): bool
     {
-        return $this->records === [] || $this->pageNumber >= $this->totalPages;
+        return $this->pageNumber >= $this->totalPages;
     }
 }

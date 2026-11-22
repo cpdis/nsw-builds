@@ -4,9 +4,8 @@ namespace App\Console\Commands;
 
 use App\Jobs\SyncNswFeedPage;
 use App\Models\SyncRun;
-use App\Sources\Nsw\ApplicationUpserter;
-use App\Sources\Nsw\EplanningClient;
 use App\Sources\Nsw\Feed;
+use App\Sources\Nsw\FeedPageSyncer;
 use Carbon\CarbonImmutable;
 use Illuminate\Console\Command;
 use Illuminate\Support\Sleep;
@@ -15,13 +14,13 @@ use Throwable;
 /**
  * Nightly incremental sync, and the same path for backfills:
  *
- *   php artisan nsw:sync                      # all feeds, updated since last run minus 2 days
+ *   php artisan nsw:sync                      # all feeds, updated since last incremental run minus 2 days
  *   php artisan nsw:sync cc --since=2026-11-01
  *   php artisan nsw:sync da --from=2023-01-01 --to=2023-12-31 --council="CITY OF PARRAMATTA"
- *   php artisan nsw:sync oc --now             # run every page inline instead of queueing (backfills from a Mac)
+ *   php artisan nsw:sync oc --now             # every page inline, no queue (backfills from a Mac)
  *
- * Only the plain scheduled form (no --since, --from, --to or --council) is an
- * incremental run, and only a finished incremental run moves the watermark.
+ * Only a plain run (no --since, --from, --to or --council) is "incremental"
+ * and moves the nightly watermark. Scoped runs never do.
  */
 class NswSync extends Command
 {
@@ -31,35 +30,40 @@ class NswSync extends Command
         {--from= : LodgementDateFrom, for backfills}
         {--to= : LodgementDateTo, for backfills}
         {--council=* : Council name(s), upper case}
-        {--now : Process pages inline rather than queueing}';
+        {--now : Process every page inline rather than queueing}';
 
     protected $description = 'Pull NSW Planning Portal DA, CDC, CC and OC records into applications';
 
-    public function handle(EplanningClient $client, ApplicationUpserter $upserter): int
+    public function handle(FeedPageSyncer $syncer): int
     {
         $feeds = collect($this->argument('feed') ?: array_column(Feed::cases(), 'value'))
             ->map(fn (string $f) => Feed::tryFrom(strtolower($f)) ?? $this->fail("Unknown feed: {$f}"));
 
+        $kind = $this->isScoped() ? SyncRun::SCOPED : SyncRun::INCREMENTAL;
         $status = self::SUCCESS;
 
         foreach ($feeds as $feed) {
-            $filters = $this->filtersFor($feed);
-            $run = SyncRun::create([
-                'feed' => $feed->value,
-                'filters' => $filters,
-                'incremental' => $this->isIncremental(),
-                'started_at' => now(),
-            ]);
+            $filters = $this->filtersFor($feed, $kind);
+            $run = SyncRun::create(['feed' => $feed->value, 'kind' => $kind, 'filters' => $filters, 'started_at' => now()]);
 
-            $this->info("{$feed->endpoint()}: ".json_encode($filters));
+            $this->info("{$feed->endpoint()} ({$kind}): ".json_encode($filters));
 
             if (! $this->option('now')) {
-                dispatch(new SyncNswFeedPage($feed, $filters, 1, $run->id));
+                SyncNswFeedPage::dispatch($feed, 1, $run->id);
 
                 continue;
             }
 
-            if (! $this->runInline($client, $upserter, $feed, $filters, $run->id)) {
+            $page = 1;
+            try {
+                while ($syncer->sync($run, $feed, $page)) {
+                    $page++;
+                    Sleep::for(config('nsw.page_delay_ms'))->milliseconds();
+                }
+                $this->line("  {$run->fresh()->records} records in {$page} page(s)");
+            } catch (Throwable $e) {
+                $run->update(['error' => "page {$page}: ".$e->getMessage()]);
+                $this->error("  failed on page {$page}: {$e->getMessage()}");
                 $status = self::FAILURE;
             }
         }
@@ -67,40 +71,13 @@ class NswSync extends Command
         return $status;
     }
 
-    /**
-     * Loop the pages here rather than letting each job dispatch the next: a
-     * self-dispatched job would land on the real queue (or nest, under the sync
-     * driver, and grow memory with every page).
-     *
-     * @param  array<string, mixed>  $filters
-     */
-    private function runInline(EplanningClient $client, ApplicationUpserter $upserter, Feed $feed, array $filters, int $runId): bool
+    private function isScoped(): bool
     {
-        for ($pageNumber = 1; ; $pageNumber++) {
-            $job = new SyncNswFeedPage($feed, $filters, $pageNumber, $runId);
-
-            try {
-                if ($job->syncPage($client, $upserter)) {
-                    return true;
-                }
-            } catch (Throwable $e) {
-                $job->failed($e);
-                $this->error("{$feed->endpoint()} page {$pageNumber}: {$e->getMessage()}");
-
-                return false;
-            }
-
-            Sleep::for(config('nsw.page_delay_ms'))->milliseconds();
-        }
-    }
-
-    private function isIncremental(): bool
-    {
-        return ! $this->option('since') && ! $this->option('from') && ! $this->option('to') && ! $this->option('council');
+        return $this->option('since') || $this->option('from') || $this->option('to') || $this->option('council');
     }
 
     /** @return array<string, mixed> */
-    private function filtersFor(Feed $feed): array
+    private function filtersFor(Feed $feed, string $kind): array
     {
         $filters = [];
 
@@ -120,7 +97,8 @@ class NswSync extends Command
 
     private function defaultSince(Feed $feed): string
     {
-        $last = SyncRun::where('feed', $feed->value)->where('incremental', true)
+        $last = SyncRun::where('feed', $feed->value)
+            ->where('kind', SyncRun::INCREMENTAL)
             ->whereNotNull('finished_at')->whereNull('error')
             ->latest('started_at')->value('started_at');
 

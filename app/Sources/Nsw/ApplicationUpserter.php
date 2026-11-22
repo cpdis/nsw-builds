@@ -4,48 +4,55 @@ namespace App\Sources\Nsw;
 
 use App\Models\Application;
 use App\Models\Builder;
-use Illuminate\Database\QueryException;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
+use Throwable;
 
 /** Writes mapped feed records into `applications`, keyed on (feed, pan). */
 class ApplicationUpserter
 {
-    /** @param list<array<string, mixed>> $records */
-    public function upsert(Feed $feed, array $records): int
+    /**
+     * @param  list<array<string, mixed>>  $records
+     * @return array{stored: int, skipped: int}
+     */
+    public function upsert(Feed $feed, array $records): array
     {
-        $mapped = array_values(array_filter(
-            array_map(fn (array $raw) => [ApplicationMapper::toAttributes($feed, $raw), $raw], $records),
-            fn (array $pair) => $pair[0]['pan'] !== '',
-        ));
+        $mapped = array_map(fn (array $raw) => [$raw, ApplicationMapper::toAttributes($feed, $raw)], $records);
 
-        $builderIds = $this->builderIds(array_column($mapped, 0));
-        $count = 0;
+        // Builders first, outside the page transaction and in name_key order,
+        // so two feeds' pages creating the same builders can't deadlock.
+        $builderIds = $this->builderIds(array_column($mapped, 1));
 
-        DB::transaction(function () use ($mapped, $builderIds, &$count) {
-            foreach ($mapped as [$a, $raw]) {
+        $stored = $skipped = 0;
+
+        DB::transaction(function () use ($mapped, $builderIds, &$stored, &$skipped) {
+            foreach ($mapped as [$raw, $a]) {
+                if ($a['pan'] === '') {
+                    $skipped++;
+
+                    continue;
+                }
+
                 try {
-                    // Savepoint per row: one row the database rejects is logged and skipped, not the page.
-                    DB::transaction(fn () => $this->upsertRow($a, $raw, $builderIds));
-                    $count++;
-                } catch (QueryException $e) {
+                    // A savepoint per row: one bad record is logged and skipped
+                    // instead of rolling back the page and halting the feed.
+                    DB::transaction(fn () => $this->store($raw, $a, $builderIds));
+                    $stored++;
+                } catch (Throwable $e) {
+                    $skipped++;
                     Log::warning('nsw: skipped record', ['feed' => $a['feed'], 'pan' => $a['pan'], 'error' => $e->getMessage()]);
                 }
             }
         });
 
-        return $count;
+        return ['stored' => $stored, 'skipped' => $skipped];
     }
 
-    /**
-     * @param  array<string, mixed>  $a
-     * @param  array<string, mixed>  $raw
-     * @param  array<string, int>  $builderIds
-     */
-    private function upsertRow(array $a, array $raw, array $builderIds): void
+    /** @param array<string, int> $builderIds */
+    private function store(array $raw, array $a, array $builderIds): void
     {
-        $builderId = $a['builder_legal_name'] === null ? null : $builderIds[BuilderNameClassifier::key($a['builder_legal_name'])];
+        $builderId = $a['builder_legal_name'] ? $builderIds[BuilderNameClassifier::key($a['builder_legal_name'])] ?? null : null;
         [$lng, $lat, $lotKeys] = [$a['lng'], $a['lat'], $a['lot_keys']];
         unset($a['lng'], $a['lat'], $a['lot_keys'], $a['builder_legal_name'], $a['builder_trading_name']);
 
@@ -55,43 +62,46 @@ class ApplicationUpserter
         );
 
         DB::update(
-            'UPDATE applications SET lot_keys = ?::text[], geom = CASE WHEN ?::float8 IS NULL THEN NULL ELSE ST_SetSRID(ST_MakePoint(?::float8, ?::float8), 4326) END WHERE id = ?',
-            [self::pgArray($lotKeys), $lng, $lng, $lat, $app->id],
+            'UPDATE applications SET lot_keys = ?::text[], geom = CASE WHEN ?::float8 IS NULL OR ?::float8 IS NULL THEN NULL ELSE ST_SetSRID(ST_MakePoint(?::float8, ?::float8), 4326) END WHERE id = ?',
+            [self::pgArray($lotKeys), $lng, $lat, $lng, $lat, $app->id],
         );
     }
 
     /**
-     * Builders are shared across feeds, and feeds sync in parallel. Creating
-     * them before the page transaction, one short statement each and in key
-     * order, means two workers never hold builder rows while waiting on each other.
-     *
-     * @param  list<array<string, mixed>>  $rows
-     * @return array<string, int> name_key => id
+     * @param  list<array<string, mixed>>  $mapped
+     * @return array<string, int> name_key => builder id
      */
-    private function builderIds(array $rows): array
+    private function builderIds(array $mapped): array
     {
-        $names = [];
-        foreach ($rows as $a) {
-            if ($a['builder_legal_name'] !== null) {
-                $names[BuilderNameClassifier::key($a['builder_legal_name'])] ??= [$a['builder_legal_name'], $a['builder_trading_name']];
+        $rows = [];
+        foreach ($mapped as $a) {
+            $legal = $a['builder_legal_name'];
+            if ($legal === null || ($key = BuilderNameClassifier::key($legal)) === '') {
+                continue;
             }
-        }
-        ksort($names, SORT_STRING);
 
-        $ids = [];
-        foreach ($names as $key => [$legal, $trading]) {
             $isCompany = BuilderNameClassifier::isCompany($legal);
-            $ids[$key] = Builder::firstOrCreate(['name_key' => $key], [
-                'legal_name' => $legal,
-                'trading_name' => $trading,
-                'slug' => Str::slug($legal).'-'.substr(md5($key), 0, 6),
+            $rows[$key] ??= [
+                'name_key' => $key,
+                'legal_name' => mb_substr($legal, 0, 255),
+                'trading_name' => $a['builder_trading_name'] ? mb_substr($a['builder_trading_name'], 0, 255) : null,
+                'slug' => Str::limit(Str::slug($legal), 200, '').'-'.substr(md5($key), 0, 6),
                 'is_company' => $isCompany,
                 'suppressed' => ! $isCompany,
                 'suppressed_reason' => $isCompany ? null : 'individual',
-            ])->id;
+                'created_at' => now(),
+                'updated_at' => now(),
+            ];
         }
 
-        return $ids;
+        if ($rows === []) {
+            return [];
+        }
+
+        ksort($rows);
+        Builder::insertOrIgnore(array_values($rows));
+
+        return Builder::whereIn('name_key', array_keys($rows))->pluck('id', 'name_key')->all();
     }
 
     /** @param list<string> $values */
