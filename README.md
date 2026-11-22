@@ -6,7 +6,9 @@ Data © NSW Department of Planning, Housing and Infrastructure, [Creative Common
 
 ## Stack
 
-Laravel 12 React starter kit (Inertia + React + Vite), Postgres 16 + PostGIS 3, MapLibre GL (to come).
+Laravel 12 Livewire starter kit (Livewire 4, Fortify auth, Flux + Flux Pro, Vite), Postgres 16 + PostGIS 3, MapLibre GL.
+
+The map is a JS island: `<x-map>` (`resources/views/components/map.blade.php`) wraps MapLibre in `wire:ignore` and the Alpine component `nswMap` (`resources/js/app.js`). Livewire pushes data into it with `$this->dispatch('map-features', features: $geojson)`.
 
 ## Layout
 
@@ -32,6 +34,9 @@ Laravel 12 React starter kit (Inertia + React + Vite), Postgres 16 + PostGIS 3, 
 # Postgres with PostGIS, e.g. on macOS:
 brew install postgresql@16 postgis && brew services start postgresql@16
 createuser -s nsw && createdb -O nsw nsw_builds && createdb -O nsw nsw_builds_test
+
+# Flux Pro is a private package. Store your licence once (writes the gitignored auth.json):
+composer config http-basic.composer.fluxui.dev you@example.com YOUR-FLUX-KEY
 
 composer install && npm ci
 cp .env.example .env && php artisan key:generate
